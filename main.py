@@ -1,4 +1,5 @@
 from pathlib import Path
+from scipy.ndimage import gaussian_filter
 
 from csrnet import load_and_process_image_with_csrnet, load_csrnet_model, load_ground_truth
 from plotting_tools import plot_csrnet_density_map, plot_ground_truth_density
@@ -19,6 +20,7 @@ def example():
     if gt_path.exists():
         gt_density = load_ground_truth(gt_path, image_path=img_path)
         plot_ground_truth_density(img, gt_density)
+
 
     plot_csrnet_density_map(img, density_map, estimated_crowd_count, block=True)
 

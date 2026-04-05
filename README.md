@@ -48,6 +48,11 @@ def example():
     plot_csrnet_density_map(img, density_map, estimated_crowd_count)
 ```
 
+This should produce plots like the ones below
+
+![Estimation](estimation_example.png)
+![GT](gt_example.png)
+
 ## Shanghai Tech Density Dataset
 A dataset of labeled single crowd images split into two folders containing
 - images: the jpg image file

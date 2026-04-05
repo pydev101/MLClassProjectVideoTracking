@@ -14,5 +14,6 @@ env.bak/
 .idea/
 .vscode/
 
-# Models
+# misc
+plots/
 *.pth
