@@ -1,0 +1,18 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+
+
+# Virtual Environments
+venv/
+.env
+.venv
+env/
+venv.bak/
+env.bak/
+
+# IDEs / Editor specific
+.idea/
+.vscode/
+
+# Models
+*.pth
