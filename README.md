@@ -21,6 +21,38 @@ The models should be downloaded from the git repo and placed in the models/csr_n
 
 Note: This is tested and working on Python 3.11.13 
 
+## Training
+
+Training is driven by `train.py`, which builds **`CSRNet` from `csrnet.py`**, loads data through **`dataset.py`**, and saves checkpoints with **`utils.save_checkpoint`**.
+
+### Data layout and JSON files
+
+- **`train_json` / `test_json`**: paths to JSON files. Each file must decode to either:
+  - a **list of image paths** (strings), or
+  - a **list of objects** with an `"img"` field pointing to each RGB image (e.g. ShanghaiTech `images/IMG_42.jpg`).
+- **Ground truth** for each image is resolved in this order:
+  1. **HDF5** (CSRNet-pytorch style): same basename as the image, `.h5` instead of `.jpg`, under a `ground_truth` directory in place of `images` (e.g. `.../ground_truth/IMG_42.h5` with dataset `density`).
+  2. Otherwise **`GT_<stem>.mat`** next to the usual ShanghaiTech layout: `.../ground_truth/GT_<stem>.mat`, loaded with **`load_ground_truth`** in `csrnet.py` (head points → Gaussian density, then downsampled for training).
+
+The dataset follows the common CSRNet convention: the full-resolution density map is **spatially reduced by 8×** (to match the network stride after three max-pool stages) and **scaled by 64**, so the map remains comparable to the original CSRNet-pytorch training recipe.
+
+### What the training loop does
+
+- **Model**: `CSRNet(load_weights=False)` initializes the frontend from **ImageNet VGG16** weights (see `csrnet.py`), then trains the full network.
+- **Input preprocessing**: ImageNet mean/std normalization (same as inference).
+- **Loss**: **MSE** with `reduction="sum"` between the predicted density map and the target map. If the target’s height/width does not exactly match the network output (e.g. odd image sizes), the target is **bilinearly resized** to the output size and **rescaled** so its sum (approximate crowd count) is unchanged.
+- **Optimization**: SGD with momentum and weight decay; learning rate is adjusted by `adjust_learning_rate` (piecewise schedule from `steps` / `scales` in `train.py`).
+- **Validation**: reports **MAE** as the mean absolute error between the **sum of the predicted map** and the **sum of the ground-truth map** per batch (count error), averaged over the val loader.
+- **Checkpoints**: each epoch saves `checkpoint.pth.tar` under the **`task`** prefix; the best MAE run is also copied to `model_best.pth.tar`. **`load_csrnet_model`** in `csrnet.py` can load these files via the `state_dict` entry.
+
+### Example command
+
+```bash
+python train.py path/to/train.json path/to/val.json 0 ./runs/exp1_ --epochs 400
+```
+
+Here `0` is `CUDA_VISIBLE_DEVICES` (pick the GPU index you want, e.g. `0`), and `./runs/exp1_` is the **`task`** prefix prepended to checkpoint filenames (create the directory beforehand if you want a subfolder). Use **`--epochs N`** to change run length (default `400`). Optional **`--pre /path/to.pth`** resumes from a checkpoint saved by this script or a compatible CSRNet checkpoint. If no CUDA device is visible, training runs on **CPU** (slower but useful for smoke tests).
+
 ## Example
 ```python
 from pathlib import Path
