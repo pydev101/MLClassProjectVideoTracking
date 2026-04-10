@@ -54,7 +54,7 @@ def random_image_example():
     This is an example of running inference on a random image and plotting the density map along with the image
     """
     # load a random image from the dataset
-    checkpoint = Path("./all_100_model_best.pth")
+    checkpoint = Path("./all_40_model_best.pth")
     model = load_csrnet_model(checkpoint, map_location="cpu")
     img_path = Path("./test_images/crowd.jpg")
     name = "crowd"

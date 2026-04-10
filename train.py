@@ -451,6 +451,8 @@ def main():
             epoch_loss = train(train_list, model, criterion, optimizer, epoch, device, status)
             prec1 = validate(val_list, model, device, status)
 
+            plotter.update(epoch, epoch_loss, prec1)
+
             # Track the best (lowest) validation MAE across all epochs.
             is_best = prec1 < best_prec1
             best_prec1 = min(prec1, best_prec1)
@@ -469,8 +471,8 @@ def main():
     console.print(f"[bold green]Training curves saved:[/] {final_path}")
 
 def scan_labeled_dir(
-    labeled_dir: str, val_fraction: float = 0.2
-) -> Tuple[List[str], List[str]]:
+        labeled_dir: str, val_fraction: float = 0.2
+    ) -> Tuple[List[str], List[str]]:
     """Scan a labeling-tool output directory and return ``(train_list, val_list)``.
 
     Discovers source images under ``<labeled_dir>/source/`` that have a matching
@@ -747,4 +749,4 @@ class AverageMeter(object):
         self.avg = self.sum / self.count    
     
 if __name__ == '__main__':
-    main()        
+    main()

@@ -108,3 +108,7 @@ Max Pooling Layers: Reduce dimensionality by selecting the largest number in a g
 - check the figures/outputs folder for example runs with different models (split into folders by model)
 
 - There are also some notes in [The Training README](training/README.md) about the training data and hyperparameters.
+
+Note: for the results below, when this was run, all_40 was only on epoch 19
+
+![crossval](figures/cross_dataset_validation.png)
