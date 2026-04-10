@@ -7,7 +7,8 @@ from plotting_tools import *
 
 def example():
     # checkpoint = Path("./models/csr_net_base/PartBmodel_best.pth")
-    checkpoint = Path("./testmodel_best.pth")
+    # checkpoint = Path("./testmodel_best.pth")
+    checkpoint = Path("./all_model_best.pth")
     img_path = Path("./ShanghaiTech_Crowd_Counting_Dataset/part_A_final/test_data/images/IMG_2.jpg")
     # img_path = Path("./test_images/1.jpeg")
 
@@ -36,7 +37,7 @@ def example():
     title = f"CSRNet Crowd Density Map\nEstimated Count: {estimated_crowd_count:.2f}"
     plot_image_with_density_map(img, interp_density_map, title=title, block=False)
     # plot just the density map
-    plot_density_map(interp_density_map, block=True, gaussian_kernel_size=(3, 3))
+    plot_density_map(interp_density_map, block=True, gaussian_kernel_size=(2, 2))
 
 
 

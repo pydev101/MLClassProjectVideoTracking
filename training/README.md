@@ -98,17 +98,6 @@ python train.py TRAIN TEST GPU TASK [--epochs N] [--pre PATH]
 | `--epochs N` | no | Number of epochs (default 400) |
 | `--pre PATH` | no | Resume from a previously saved checkpoint |
 
-**Common mistake:** putting `--epochs` before `task`. This makes argparse think
-`task` is missing. Always place the four positional args first:
-
-```bash
-# Correct
-python train.py training/part_A_train.json training/part_A_test.json 0 partA_ --epochs 400
-
-# Wrong — "task" is missing because argparse consumes "0" as GPU
-python train.py training/part_A_train.json training/part_A_test.json 0 --epochs 400
-```
-
 ### 3. Resume from a checkpoint
 
 ```bash
