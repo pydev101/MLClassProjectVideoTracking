@@ -5,3 +5,4 @@ pillow
 matplotlib
 scipy
 h5py
+rich>=13.0.0

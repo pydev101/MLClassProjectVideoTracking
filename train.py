@@ -28,11 +28,12 @@ images with matching JSON manifests.  No JSON file args are needed.
 
 import argparse
 import json
+import math
 import os
 import random
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -42,6 +43,13 @@ from torchvision import transforms
 import dataset
 from csrnet import CSRNet
 import shutil
+
+from rich.align import Align
+from rich.box import ROUNDED
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.text import Text
 
 
 parser = argparse.ArgumentParser(description='PyTorch CSRNet')
@@ -55,6 +63,173 @@ parser.add_argument('--labeled-dir', type=str, default=None,
     help='path to labeled_data directory from the labeling tool; overrides train/test json')
 parser.add_argument('--val-fraction', type=float, default=0.2,
     help='fraction of labeled images held out for validation (default: 0.2)')
+
+
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 0 or not math.isfinite(seconds):
+        return "—"
+    total = int(max(0, round(seconds)))
+    h, r = divmod(total, 3600)
+    m, s = divmod(r, 60)
+    if h:
+        return f"{h:d}:{m:02d}:{s:02d}"
+    return f"{m:d}:{s:02d}"
+
+
+class TrainingStatusLine:
+    """Rich live status for throughput, epoch progress, elapsed time, and ETA."""
+
+    def __init__(self, console: Console, args: argparse.Namespace) -> None:
+        self.console = console
+        self.args = args
+        self.train_t0 = time.perf_counter()
+        self.live: Optional[Live] = None
+        self.phase = "warmup"
+        self.epoch = 0
+        self.batch_i = 0
+        self.n_batches = 1
+        self.loss_val = 0.0
+        self.loss_avg = 0.0
+        self.img_per_s = 0.0
+        self.epoch_per_s = 0.0
+        self.eta_sec = float("nan")
+        self.val_i = 0
+        self.val_n = 0
+        self.total_epochs_span = max(1, args.epochs - args.start_epoch)
+
+    def refresh(self) -> None:
+        if self.live is not None:
+            self.live.update(self.render())
+
+    def render(self) -> Panel:
+        elapsed = time.perf_counter() - self.train_t0
+        sep = Text("  ", style="dim")
+        row = Text()
+
+        row.append("◆ ", style="bold magenta")
+        row.append(f"epoch ", style="dim")
+        row.append(
+            f"{self.epoch + 1}/{self.args.epochs}",
+            style="bold yellow",
+        )
+        row.append_text(sep)
+        row.append("batch ", style="dim")
+        pct = 100.0 * (self.batch_i + 1) / max(1, self.n_batches)
+        row.append(
+            f"{self.batch_i + 1}/{self.n_batches}",
+            style="bold green",
+        )
+        row.append(f" ({pct:.0f}%)", style="green")
+
+        row.append_text(sep)
+        row.append("loss ", style="dim")
+        row.append(f"{self.loss_val:.4f}", style="cyan")
+        row.append(" (μ ", style="dim")
+        row.append(f"{self.loss_avg:.4f}", style="bold cyan")
+        row.append(")", style="dim")
+
+        row.append_text(sep)
+        row.append("lr ", style="dim")
+        row.append(f"{self.args.lr:.2e}", style="white")
+
+        row2 = Text()
+        row2.append("⚡ ", style="bold bright_yellow")
+        row2.append("imgs/s ", style="dim")
+        row2.append(
+            f"{self.img_per_s:.2f}",
+            style="bold bright_cyan",
+        )
+        row2.append_text(sep)
+        row2.append("epochs/s ", style="dim")
+        row2.append(
+            f"{self.epoch_per_s:.4f}",
+            style="bold bright_green",
+        )
+        row2.append_text(sep)
+        row2.append("⏱ elapsed ", style="dim")
+        row2.append(_fmt_duration(elapsed), style="bold white")
+        row2.append_text(sep)
+        row2.append("ETA ", style="dim")
+        row2.append(_fmt_duration(self.eta_sec), style="bold bright_blue")
+
+        if self.phase == "val":
+            row2.append_text(sep)
+            row2.append("◎ val ", style="dim")
+            row2.append(
+                f"{self.val_i + 1}/{max(1, self.val_n)}",
+                style="magenta",
+            )
+
+        subtitle = Text()
+        subtitle.append(self.phase.upper(), style="bold dim")
+
+        inner = Group(Align.left(row), Align.left(row2))
+        return Panel(
+            inner,
+            title="[bold white on blue] CSRNet [/] [dim]training[/]",
+            subtitle=subtitle,
+            subtitle_align="left",
+            box=ROUNDED,
+            border_style="bright_blue",
+            padding=(0, 1),
+        )
+
+    def set_train_batch(
+        self,
+        epoch: int,
+        batch_i: int,
+        n_batches: int,
+        batch_time_s: float,
+        loss_val: float,
+        loss_avg: float,
+    ) -> None:
+        self.phase = "train"
+        self.epoch = epoch
+        self.batch_i = batch_i
+        self.n_batches = max(1, n_batches)
+        self.loss_val = loss_val
+        self.loss_avg = loss_avg
+
+        if batch_time_s > 1e-9:
+            self.img_per_s = self.args.batch_size / batch_time_s
+
+        elapsed = time.perf_counter() - self.train_t0
+        progress_epochs = (
+            (epoch - self.args.start_epoch)
+            + (batch_i + 1) / self.n_batches
+        )
+        if elapsed > 1e-6 and progress_epochs > 1e-9:
+            self.epoch_per_s = progress_epochs / elapsed
+        else:
+            self.epoch_per_s = 0.0
+
+        remaining = self.total_epochs_span - progress_epochs
+        if progress_epochs > 1e-6 and remaining >= 0 and math.isfinite(elapsed):
+            self.eta_sec = (elapsed / progress_epochs) * remaining
+        else:
+            self.eta_sec = float("nan")
+
+        self.refresh()
+
+    def start_validation(self, n_batches: int) -> None:
+        self.phase = "val"
+        self.val_i = 0
+        self.val_n = max(1, n_batches)
+        self.refresh()
+
+    def validation_step(self, batch_i: int) -> None:
+        self.val_i = batch_i
+        self.refresh()
+
+    def end_validation(self) -> None:
+        self.phase = "train"
+
+    def start_epoch_message(self, epoch: int, n_batches: int) -> None:
+        self.epoch = epoch
+        self.n_batches = max(1, n_batches)
+        self.batch_i = -1
+        self.phase = "train"
+
 
 def main():
     global args, best_prec1
@@ -151,28 +326,40 @@ def main():
             print("=> no checkpoint found at '{}'".format(args.pre))
         
 
-    # Train the model for the specified number of epochs
-    for epoch in range(args.start_epoch, args.epochs):
-        
-        # Adjust the learning rate based on the epoch
-        adjust_learning_rate(optimizer, epoch)
-        
-        # Train the model for one epoch
-        train(train_list, model, criterion, optimizer, epoch, device)
-        # Validate the model on the validation set
-        prec1 = validate(val_list, model, device)
-        
-        # Track the best (lowest) validation MAE across all epochs.
-        is_best = prec1 < best_prec1
-        best_prec1 = min(prec1, best_prec1)
-        print(' * best MAE {mae:.3f} '.format(mae=best_prec1))
-        save_checkpoint({
-            'epoch': epoch + 1,
-            'arch': args.pre,
-            'state_dict': model.state_dict(),
-            'best_prec1': best_prec1,
-            'optimizer' : optimizer.state_dict(),
-        }, is_best,args.task)
+    console = Console()
+    status = TrainingStatusLine(console, args)
+    live_ctx = Live(
+        status.render(),
+        console=console,
+        refresh_per_second=12,
+        transient=False,
+    )
+    status.live = live_ctx
+
+    with live_ctx:
+        # Train the model for the specified number of epochs
+        for epoch in range(args.start_epoch, args.epochs):
+
+            # Adjust the learning rate based on the epoch
+            adjust_learning_rate(optimizer, epoch)
+            # Train the model for one epoch
+            train(train_list, model, criterion, optimizer, epoch, device, status)
+            # Validate the model on the validation set
+            prec1 = validate(val_list, model, device, status)
+
+            # Track the best (lowest) validation MAE across all epochs.
+            is_best = prec1 < best_prec1
+            best_prec1 = min(prec1, best_prec1)
+            console.print(
+                f"[bold green] * best MAE[/] [bold white]{best_prec1:.3f}[/]"
+            )
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'arch': args.pre,
+                'state_dict': model.state_dict(),
+                'best_prec1': best_prec1,
+                'optimizer' : optimizer.state_dict(),
+            }, is_best, args.task)
 
 def scan_labeled_dir(
     labeled_dir: str, val_fraction: float = 0.2
@@ -212,7 +399,15 @@ def scan_labeled_dir(
     return images[n_val:], images[:n_val]
 
 
-def train(train_list, model, criterion, optimizer, epoch, device):
+def train(
+    train_list,
+    model,
+    criterion,
+    optimizer,
+    epoch,
+    device,
+    status: Optional[TrainingStatusLine],
+):
     """
     Run one training epoch over all images in ``train_list``.
 
@@ -242,8 +437,16 @@ def train(train_list, model, criterion, optimizer, epoch, device):
             num_workers=args.workers),
             batch_size=args.batch_size
         )
-    print('epoch %d, processed %d samples, lr %.10f' % (epoch, epoch * len(train_loader.dataset), args.lr))
-    
+    n_batches = len(train_loader)
+    if status is not None:
+        status.start_epoch_message(epoch, n_batches)
+        status.refresh()
+    else:
+        print(
+            "epoch %d, processed %d samples, lr %.10f"
+            % (epoch, epoch * len(train_loader.dataset), args.lr)
+        )
+
     # Set the model to training mode
     model.train()
     end = time.time()
@@ -285,18 +488,37 @@ def train(train_list, model, criterion, optimizer, epoch, device):
         
         batch_time.update(time.time() - end)
         end = time.time()
-        
-        # print the loss every 30 iterations
-        if i % args.print_freq == 0:
-            print('Epoch: [{0}][{1}/{2}]\t'
-                    'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                    'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                    'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                    .format(
-                    epoch, i, len(train_loader), batch_time=batch_time,
-                    data_time=data_time, loss=losses))
-    
-def validate(val_list, model, device):
+
+        if status is not None:
+            status.set_train_batch(
+                epoch,
+                i,
+                n_batches,
+                batch_time.avg,
+                losses.val,
+                losses.avg,
+            )
+        elif i % args.print_freq == 0:
+            print(
+                "Epoch: [{0}][{1}/{2}]\t"
+                "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
+                "Data {data_time.val:.3f} ({data_time.avg:.3f})\t"
+                "Loss {loss.val:.4f} ({loss.avg:.4f})\t".format(
+                    epoch,
+                    i,
+                    n_batches,
+                    batch_time=batch_time,
+                    data_time=data_time,
+                    loss=losses,
+                )
+            )
+
+def validate(
+    val_list,
+    model,
+    device,
+    status: Optional[TrainingStatusLine],
+):
     """
     Evaluate model on the validation set and return the Mean Absolute Error
     (MAE) of the crowd-count prediction.
@@ -305,7 +527,6 @@ def validate(val_list, model, device):
     the predicted density map and the *sum* of the ground-truth density map
     across all validation images.  Lower is better.
     """
-    print("begin test")
     test_loader = torch.utils.data.DataLoader(
     dataset.listDataset(val_list,
                     shuffle=False,
@@ -313,13 +534,16 @@ def validate(val_list, model, device):
                         transforms.ToTensor(),transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                         std=[0.229, 0.224, 0.225]),
                     ]),  train=False),
-    batch_size=args.batch_size)    
-    
+    batch_size=args.batch_size)
+
     model.eval()
-    
+
     mae = 0.0
     if len(test_loader) == 0:
         return mae
+
+    if status is not None:
+        status.start_validation(len(test_loader))
 
     for i, (img, target) in enumerate(test_loader):
         img = img.to(device)
@@ -336,11 +560,17 @@ def validate(val_list, model, device):
             target = target * (tsum / (target.sum() + 1e-8))
         # MAE is based on the *count* (sum of density), not per-pixel error.
         mae += torch.abs(output.sum() - target.sum()).item()
-        
-    mae = mae/len(test_loader)    
-    print(' * MAE {mae:.3f} '.format(mae=mae))
+        if status is not None:
+            status.validation_step(i)
 
-    return mae    
+    mae = mae / len(test_loader)
+    if status is not None:
+        status.end_validation()
+        status.console.print(f"[dim] * MAE[/] [bold]{mae:.3f}[/]")
+    else:
+        print(" * MAE {mae:.3f} ".format(mae=mae))
+
+    return mae
         
 def adjust_learning_rate(optimizer, epoch):
     """Apply the piecewise learning-rate schedule defined by ``args.steps``
