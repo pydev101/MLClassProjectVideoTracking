@@ -538,3 +538,113 @@ def mall_load_ground_truth_density_map(
         density = gaussian_filter(density, sigma=float(density_sigma))
 
     return density
+
+
+
+################################################################################################
+# Ground-truth loading for data created using the labeling tool
+#
+# The labeling tool produces two interchangeable ground-truth formats:
+#   - JSON manifest (.json): contains head click coordinates, image dimensions,
+#     Gaussian sigma, and relative paths to sibling files.
+#   - HDF5 mask (.h5): a binary (H, W) mask with 1 at each clicked pixel and a
+#     ``sigma_heatmap_px`` attribute.
+#
+# ``labeltool_load_ground_truth_density_map`` accepts either format and returns
+# a Gaussian-smoothed density map identical in spirit to the ShanghaiTech loader.
+################################################################################################
+
+
+def _labeltool_points_from_json(data: dict) -> np.ndarray:
+    """Extract ``(N, 2)`` float64 ``(x, y)`` head coordinates from a parsed labeling-tool manifest."""
+    clicks = data.get("clicks_xy_image_space", [])
+    if not clicks:
+        return np.zeros((0, 2), dtype=np.float64)
+    return np.array([[c["x"], c["y"]] for c in clicks], dtype=np.float64)
+
+
+def _labeltool_load_from_json(
+    json_path: Path,
+    *,
+    density_sigma: Optional[float] = None,
+) -> np.ndarray:
+    """Build a density map from a labeling-tool JSON manifest."""
+    import json as _json
+
+    with open(json_path, "r", encoding="utf-8") as fh:
+        data = _json.load(fh)
+
+    h, w = int(data["dimensions_hw"][0]), int(data["dimensions_hw"][1])
+    if density_sigma is None:
+        density_sigma = float(data.get("gaussian_sigma_pixels", 4.0))
+
+    points = _labeltool_points_from_json(data)
+
+    density = np.zeros((h, w), dtype=np.float64)
+    for x, y in points:
+        xi, yi = int(np.floor(x)), int(np.floor(y))
+        if 0 <= yi < h and 0 <= xi < w:
+            density[yi, xi] += 1.0
+
+    if density_sigma > 0.0:
+        density = gaussian_filter(density, sigma=float(density_sigma))
+
+    return density
+
+
+def _labeltool_load_from_h5(
+    h5_path: Path,
+    *,
+    density_sigma: Optional[float] = None,
+) -> np.ndarray:
+    """Build a density map from a labeling-tool H5 mask file."""
+    import h5py
+
+    with h5py.File(h5_path, "r") as f:
+        mask = f["mask"][:]
+        if density_sigma is None:
+            density_sigma = float(f["mask"].attrs.get("sigma_heatmap_px", 4.0))
+
+    density = mask.astype(np.float64)
+
+    if density_sigma > 0.0:
+        density = gaussian_filter(density, sigma=float(density_sigma))
+
+    return density
+
+
+def labeltool_load_ground_truth_density_map(
+    ground_truth_path: Union[str, Path],
+    *,
+    density_sigma: Optional[float] = None,
+) -> np.ndarray:
+    """
+    Load ground truth produced by the labeling tool and build a 2D density map.
+
+    Accepts either the ``.json`` manifest or the ``.h5`` mask file.  Image
+    dimensions and the default Gaussian sigma are read directly from the file,
+    so no separate ``image_path`` / ``image_shape`` argument is needed.
+
+    Args:
+        ground_truth_path: Path to a labeling-tool ``.json`` manifest **or** ``.h5`` mask.
+        density_sigma: Override the Gaussian sigma stored in the file.  Pass ``0`` to
+            skip smoothing entirely and get a raw impulse map.
+
+    Returns:
+        np.ndarray: 2D density map ``float64`` of shape ``(H, W)``, summing to approximately
+        the head count when ``density_sigma > 0``.
+
+    Raises:
+        ValueError: If the file extension is neither ``.json`` nor ``.h5``.
+    """
+    path = Path(ground_truth_path)
+    ext = path.suffix.lower()
+
+    if ext == ".json":
+        return _labeltool_load_from_json(path, density_sigma=density_sigma)
+    if ext in (".h5", ".hdf5"):
+        return _labeltool_load_from_h5(path, density_sigma=density_sigma)
+
+    raise ValueError(
+        f"Unsupported file extension {ext!r}; expected .json or .h5 / .hdf5"
+    )

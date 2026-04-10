@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "source_image": "\\\\?\\C:\\Users\\taylor\\Documents\\GIT\\MLClassProjectVideoTracking\\test_images\\1.jpeg",
+  "dimensions_hw": [
+    180,
+    280
+  ],
+  "total_heads": 26,
+  "clicks_xy_image_space": [
+    {
+      "x": 45,
+      "y": 109
+    },
+    {
+      "x": 53,
+      "y": 102
+    },
+    {
+      "x": 3,
+      "y": 74
+    },
+    {
+      "x": 1,
+      "y": 92
+    },
+    {
+      "x": 11,
+      "y": 33
+    },
+    {
+      "x": 69,
+      "y": 7
+    },
+    {
+      "x": 62,
+      "y": 34
+    },
+    {
+      "x": 60,
+      "y": 41
+    },
+    {
+      "x": 41,
+      "y": 43
+    },
+    {
+      "x": 144,
+      "y": 25
+    },
+    {
+      "x": 98,
+      "y": 49
+    },
+    {
+      "x": 100,
+      "y": 42
+    },
+    {
+      "x": 109,
+      "y": 85
+    },
+    {
+      "x": 159,
+      "y": 67
+    },
+    {
+      "x": 173,
+      "y": 60
+    },
+    {
+      "x": 211,
+      "y": 65
+    },
+    {
+      "x": 249,
+      "y": 36
+    },
+    {
+      "x": 278,
+      "y": 83
+    },
+    {
+      "x": 244,
+      "y": 115
+    },
+    {
+      "x": 265,
+      "y": 144
+    },
+    {
+      "x": 219,
+      "y": 130
+    },
+    {
+      "x": 186,
+      "y": 134
+    },
+    {
+      "x": 163,
+      "y": 143
+    },
+    {
+      "x": 153,
+      "y": 103
+    },
+    {
+      "x": 159,
+      "y": 112
+    },
+    {
+      "x": 116,
+      "y": 135
+    }
+  ],
+  "files": {
+    "manifest_json": "ground_truth\\json\\1_20260410T054608Z.json",
+    "ground_truth_h5": "ground_truth\\h5\\1_20260410T054608Z.h5",
+    "source_image_copy": "source\\1_20260410T054608Z.jpeg",
+    "heatmap_png": "heatmap\\1_20260410T054608Z.png"
+  },
+  "gaussian_sigma_pixels": 12.0
+}

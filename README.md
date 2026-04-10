@@ -82,8 +82,8 @@ def example():
 
 This should produce plots like the ones below
 
-![Estimation](estimation_example.png)
-![GT](gt_example.png)
+![Estimation](figures/estimation_example.png)
+![GT](figures/gt_example.png)
 
 ## Shanghai Tech Density Dataset
 A dataset of labeled single crowd images split into two folders containing
@@ -100,3 +100,11 @@ Roughly, it hsa the following architecture: It is basically VGG-16 without the f
 
 VGG: An image focused CNN architecture that uses lots of small 3x3 convolutions with occasional max pooling layers
 Max Pooling Layers: Reduce dimensionality by selecting the largest number in a grid
+
+
+## Notes for Clara
+- Training was, at first, done on the shanghai_A dataset for about 20 epochs (testmodel_best.pth was the result). Next, I started running 
+
+- check the figures/outputs folder for example runs with different models (split into folders by model)
+
+- There are also some notes in [The Training README](training/README.md) about the training data and hyperparameters.

@@ -14,13 +14,40 @@
 # Each delegates to ``plot_density_overlay`` for the actual matplotlib work.
 
 from __future__ import annotations
-from typing import Optional, Tuple
+from pathlib import Path
+from typing import Optional, Tuple, Union
 from scipy.ndimage import gaussian_filter
 import numpy as np
 from matplotlib import cm as CM
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 from PIL import Image
+
+FIGURES_DIR = Path(__file__).resolve().parent / "figures" / "outputs"
+
+
+def _resolve_save_path(
+    base: str,
+    name: Optional[str] = None,
+    ext: str = ".png",
+    directory: Union[str, Path] = FIGURES_DIR,
+) -> Path:
+    """Build a non-colliding save path under *directory*.
+
+    The final filename is ``{base}_{name}{_N}{ext}`` where *name* is omitted
+    when ``None`` and *N* is only appended when the path already exists
+    (starting at 1 and incrementing).
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    stem = f"{base}_{name}" if name else base
+    candidate = directory / f"{stem}{ext}"
+    counter = 1
+    while candidate.exists():
+        candidate = directory / f"{stem}_{counter}{ext}"
+        counter += 1
+    return candidate
 
 
 def plot_image_with_density_map(
@@ -33,6 +60,8 @@ def plot_image_with_density_map(
         cmap=CM.jet,
         show: bool = True,
         block: bool = False,
+        save: bool = False,
+        name: Optional[str] = None,
     ) -> Figure:
     """
     Show an RGB image with a density heatmap overlaid (heatmap stretched to image bounds).
@@ -51,6 +80,9 @@ def plot_image_with_density_map(
         show: If True, call ``plt.show()``.
         block: Passed to ``plt.show(block=...)``: if True, wait until the figure window is closed
             (when the GUI backend supports it). Defaults to False (non-blocking).
+        save: If True, save the figure to the ``figures/`` directory.
+        name: Optional label inserted into the filename (e.g. ``"crowd"`` →
+            ``image_density_overlay_crowd.png``).
 
     Returns:
         matplotlib.figure.Figure: The figure containing the plot.
@@ -75,6 +107,10 @@ def plot_image_with_density_map(
         ax.set_title(title)
     ax.axis("off")
     fig.tight_layout()
+    if save:
+        path = _resolve_save_path("image_density_overlay", name=name)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        print(f"Saved: {path}")
     if show:
         plt.show(block=block)
     return fig
@@ -88,6 +124,8 @@ def plot_density_map(
         cmap=CM.jet,
         show: bool = True,
         block: bool = False,
+        save: bool = False,
+        name: Optional[str] = None,
     ) -> Figure:
     """
     Plot a standalone density heatmap (no base image underneath).
@@ -102,24 +140,32 @@ def plot_density_map(
         cmap: Colormap for the heatmap.
         show: If True, call ``plt.show()``.
         block: Passed to ``plt.show(block=...)`` (default non-blocking).
+        save: If True, save the figure to the ``figures/`` directory.
+        name: Optional label inserted into the filename (e.g. ``"crowd"`` →
+            ``density_heatmap_crowd.png``).
 
     Returns:
         matplotlib.figure.Figure: The figure containing the plot.
     """
-    # Apply Gaussian blur if requested
     if gaussian_kernel_size is not None:
         blurred = gaussian_blur(np.asarray(density_map, dtype=np.float64), kernel_size=gaussian_kernel_size)
     else:
         blurred = np.asarray(density_map, dtype=np.float64)
 
-    # Plot the density map
+    if title is None:
+        count = float(np.sum(blurred))
+        title = f"Density Heatmap\nEstimated Count: {count:.2f}"
+
     fig, ax = plt.subplots(figsize=figsize)
     im = ax.imshow(blurred, cmap=cmap)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    if title:
-        ax.set_title(title)
+    ax.set_title(title)
     ax.axis("off")
     fig.tight_layout()
+    if save:
+        path = _resolve_save_path("density_heatmap", name=name)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        print(f"Saved: {path}")
     if show:
         plt.show(block=block)
     return fig
@@ -133,12 +179,14 @@ def plot_ground_truth_density(
         alpha: float = 0.5,
         show: bool = True,
         block: bool = False,
+        save: bool = False,
+        name: Optional[str] = None,
     ) -> Figure:
     """Small wrapper for plotting ground truth data ontop of an image"""
     if title is None:
         count = float(np.sum(ground_truth_density))
         title = f"Ground Truth Density Map\nCount (sum): {count:.2f}"
-    return plot_image_with_density_map(
+    fig = plot_image_with_density_map(
         image,
         ground_truth_density,
         title=title,
@@ -146,7 +194,13 @@ def plot_ground_truth_density(
         alpha=alpha,
         show=show,
         block=block,
+        save=False,
     )
+    if save:
+        path = _resolve_save_path("ground_truth_density", name=name)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        print(f"Saved: {path}")
+    return fig
 
 def gaussian_blur(density_map: np.ndarray, kernel_size: Tuple[int, int] = (5, 5)) -> np.ndarray:
     """
