@@ -56,5 +56,5 @@ def random_image_example():
     plot_density_map(interp_density_map, block=True, gaussian_kernel_size=(2, 2))
 
 if __name__ == "__main__":
-    # example()
-    random_image_example()
+    example()
+    # random_image_example()
