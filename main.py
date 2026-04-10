@@ -40,6 +40,21 @@ def example():
     plot_density_map(interp_density_map, block=True, gaussian_kernel_size=(2, 2))
 
 
+def random_image_example():
+    """
+    This is an example of running inference on a random image and plotting the density map along with the image
+    """
+    # load a random image from the dataset
+    checkpoint = Path("./all_model_best.pth")
+    model = load_csrnet_model(checkpoint, map_location="cpu")
+    img_path = Path("./tools/labeling/labeled_data/source/protest_masked.jpg")
+    img, density_map, estimated_crowd_count = load_and_process_image_with_csrnet(model, img_path)
+    h, w = img.size[1], img.size[0]
+    interp_density_map = bilinear_interpolation(density_map, (h, w))
+    title = f"CSRNet Crowd Density Map\nEstimated Count: {estimated_crowd_count:.2f}"
+    plot_image_with_density_map(img, interp_density_map, title=title, block=False)
+    plot_density_map(interp_density_map, block=True, gaussian_kernel_size=(2, 2))
 
 if __name__ == "__main__":
-    example()
+    # example()
+    random_image_example()

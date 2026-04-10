@@ -12,38 +12,49 @@ pairs loaded through ``dataset.listDataset``.  The training loop:
      c. Evaluates MAE on the validation set.
      d. Saves a checkpoint (and copies it as "best" when MAE improves).
 
-Usage example:
-    python train.py path/to/train.json path/to/val.json 0 ./runs/exp1_ --epochs 400
+Usage examples:
+    python train.py path/to/train.json path/to/val.json --gpu 0 --task ./runs/exp1_ --epochs 400
+    python train.py --labeled-dir ./tools/labeling/labeled_data --gpu 0 --task ./runs/labeled_
 
 If ``train_json`` is a **combined** file (JSON object with ``"train"`` and ``"test"``
 lists), both splits are read from that file. Pass the same path again as
 ``test_json`` to satisfy the CLI, or any path (the second file is ignored when
 the first is combined).
 
-Positional args: train_json, test_json, gpu (CUDA device id), task (checkpoint prefix).
+When ``--labeled-dir`` is given, the training/validation lists are built
+automatically by scanning the labeling tool's output directory for source
+images with matching JSON manifests.  No JSON file args are needed.
 """
 
 import argparse
 import json
 import os
+import random
 import time
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms
+
 import dataset
 from csrnet import CSRNet
 import shutil
-from typing import Any, Dict
 
 
 parser = argparse.ArgumentParser(description='PyTorch CSRNet')
-parser.add_argument('train_json', metavar='TRAIN', help='path to train json')
-parser.add_argument('test_json', metavar='TEST', help='path to test json')
-parser.add_argument('--pre', '-p', metavar='PRETRAINED', default=None,type=str, help='path to the pretrained model')
-parser.add_argument('gpu',metavar='GPU', type=str, help='GPU id to use.')
-parser.add_argument('task',metavar='TASK', type=str, help='task id to use.')
+parser.add_argument('train_json', metavar='TRAIN', nargs='?', default=None, help='path to train json')
+parser.add_argument('test_json', metavar='TEST', nargs='?', default=None, help='path to test json')
+parser.add_argument('--pre', '-p', metavar='PRETRAINED', default=None, type=str, help='path to the pretrained model')
+parser.add_argument('--gpu', '-g', default='0', type=str, help='GPU id to use (default: 0)')
+parser.add_argument('--task', default='labeled_', type=str, help='checkpoint prefix (default: labeled_)')
 parser.add_argument('--epochs', type=int, default=400, help='number of epochs to train (default: 400)')
+parser.add_argument('--labeled-dir', type=str, default=None,
+    help='path to labeled_data directory from the labeling tool; overrides train/test json')
+parser.add_argument('--val-fraction', type=float, default=0.2,
+    help='fraction of labeled images held out for validation (default: 0.2)')
 
 def main():
     global args, best_prec1
@@ -76,23 +87,29 @@ def main():
     args.seed = time.time()
     args.print_freq = 30
 
-    # Load the training and validation lists from the JSON files
-    with open(args.train_json, "r", encoding="utf-8") as outfile:
-        train_blob = json.load(outfile)
-    if isinstance(train_blob, dict) and "train" in train_blob and "test" in train_blob:
-        train_list = train_blob["train"]
-        val_list = train_blob["test"]
-        p_train = os.path.normcase(os.path.abspath(args.train_json))
-        p_test = os.path.normcase(os.path.abspath(args.test_json))
-        if p_train != p_test:
-            print(
-                "=> train_json is a combined file (train+test keys); ignoring TEST path:",
-                args.test_json,
-            )
+    if args.labeled_dir:
+        train_list, val_list = scan_labeled_dir(args.labeled_dir, args.val_fraction)
+        print(f"=> Labeled dir: {args.labeled_dir}")
+        print(f"   Training images: {len(train_list)}, Validation images: {len(val_list)}")
+    elif args.train_json:
+        with open(args.train_json, "r", encoding="utf-8") as outfile:
+            train_blob = json.load(outfile)
+        if isinstance(train_blob, dict) and "train" in train_blob and "test" in train_blob:
+            train_list = train_blob["train"]
+            val_list = train_blob["test"]
+            p_train = os.path.normcase(os.path.abspath(args.train_json))
+            p_test = os.path.normcase(os.path.abspath(args.test_json))
+            if p_train != p_test:
+                print(
+                    "=> train_json is a combined file (train+test keys); ignoring TEST path:",
+                    args.test_json,
+                )
+        else:
+            train_list = train_blob
+            with open(args.test_json, "r", encoding="utf-8") as outfile:
+                val_list = json.load(outfile)
     else:
-        train_list = train_blob
-        with open(args.test_json, "r", encoding="utf-8") as outfile:
-            val_list = json.load(outfile)
+        parser.error("Provide train_json/test_json or --labeled-dir")
     
     # Pin the GPU visible to this process and seed all RNGs for reproducibility.
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
@@ -156,6 +173,44 @@ def main():
             'best_prec1': best_prec1,
             'optimizer' : optimizer.state_dict(),
         }, is_best,args.task)
+
+def scan_labeled_dir(
+    labeled_dir: str, val_fraction: float = 0.2
+) -> Tuple[List[str], List[str]]:
+    """Scan a labeling-tool output directory and return ``(train_list, val_list)``.
+
+    Discovers source images under ``<labeled_dir>/source/`` that have a matching
+    JSON manifest in ``<labeled_dir>/ground_truth/json/``.  When fewer than 5
+    images are available, all images are used for both training *and* validation
+    so the model can at least overfit as a sanity check.
+    """
+    root = Path(labeled_dir)
+    source_dir = root / "source"
+    manifest_dir = root / "ground_truth" / "json"
+
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"No source/ subdirectory in {labeled_dir}")
+
+    IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
+    images: List[str] = []
+    for img_path in sorted(source_dir.iterdir()):
+        if img_path.is_file() and img_path.suffix.lower() in IMG_EXT:
+            manifest = manifest_dir / f"{img_path.stem}.json"
+            if manifest.is_file():
+                images.append(str(img_path))
+
+    if not images:
+        raise FileNotFoundError(
+            f"No labeled images with matching manifests found in {labeled_dir}"
+        )
+
+    if len(images) < 5:
+        return list(images), list(images)
+
+    random.shuffle(images)
+    n_val = max(1, int(len(images) * val_fraction))
+    return images[n_val:], images[:n_val]
+
 
 def train(train_list, model, criterion, optimizer, epoch, device):
     """

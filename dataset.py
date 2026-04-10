@@ -2,14 +2,19 @@
 CSRNet training dataset.
 
 This module provides a PyTorch ``Dataset`` that pairs each crowd image with its
-corresponding density-map target.  It supports three ground-truth formats:
+corresponding density-map target.  It supports four ground-truth formats:
 
   1. **HDF5** (CSRNet-pytorch convention) – ``<stem>.h5`` with a ``density``
      dataset, stored under a ``ground_truth/`` folder parallel to ``images/``.
   2. **MATLAB** (ShanghaiTech convention) – ``GT_<stem>.mat`` containing head
      annotations, converted on-the-fly to a Gaussian density map by
      ``load_ground_truth``.
-  3. **MATLAB** (Mall convention) – a single ``mall_gt.mat`` next to the
+  3. **Labeling tool** – JSON manifest under
+     ``<root>/ground_truth/json/<stem>.json`` with ``clicks_xy_image_space``
+     and ``dimensions_hw``.  Source images live in ``<root>/source/<stem>.*``.
+     Add the **source copy** paths (not the original image paths) to training
+     JSONs so the manifest can be discovered automatically.
+  4. **MATLAB** (Mall convention) – a single ``mall_gt.mat`` next to the
      ``frames/`` directory, with images named ``seq_NNNNNN.jpg``; uses
      ``csrnet.mall_load_ground_truth_density_map`` (with an in-memory cache so
      the ``.mat`` file is not re-read every frame).
@@ -193,14 +198,44 @@ def _density_downsample(target: np.ndarray) -> np.ndarray:
     return resized * 64.0
 
 
+def _load_density_from_labeled_manifest(
+    manifest_path: Union[str, Path],
+    density_sigma: float = 4.0,
+) -> np.ndarray:
+    """Build a Gaussian density map from a labeling-tool JSON manifest.
+
+    The manifest stores click coordinates (``clicks_xy_image_space``) and the
+    image dimensions (``dimensions_hw``).  Each click becomes a unit impulse
+    that is then Gaussian-smoothed so the map sum ≈ the head count.
+    """
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    h, w = manifest["dimensions_hw"]
+    clicks = manifest["clicks_xy_image_space"]
+
+    density = np.zeros((h, w), dtype=np.float64)
+    for click in clicks:
+        x, y = int(click["x"]), int(click["y"])
+        if 0 <= y < h and 0 <= x < w:
+            density[y, x] += 1.0
+
+    if density_sigma > 0.0:
+        density = gaussian_filter(density, sigma=float(density_sigma))
+
+    return density
+
+
 def load_data(img_path: str, train: bool = True) -> tuple[Image.Image, np.ndarray]:
     """
     Load an RGB image and its matching density-map target.
 
-    Ground-truth resolution order:
-      1. Look for an ``.h5`` file (CSRNet-pytorch pre-computed density).
-      2. Fall back to ``GT_<stem>.mat`` (ShanghaiTech head annotations ->
-         Gaussian density built on the fly).
+    Ground-truth resolution order (first match wins):
+      1. ``.h5`` file with ``density`` key (CSRNet-pytorch pre-computed density).
+      2. ``GT_<stem>.mat`` (ShanghaiTech head annotations → Gaussian density).
+      3. Labeling-tool JSON manifest at ``<root>/ground_truth/json/<stem>.json``
+         (click coordinates → Gaussian density built on the fly).
+      4. ``mall_gt.mat`` (Mall dataset).
 
     When ``train=True``, a random horizontal flip is applied 20 % of the time
     as a simple data-augmentation step.  The density map is always down-sampled
@@ -214,12 +249,15 @@ def load_data(img_path: str, train: bool = True) -> tuple[Image.Image, np.ndarra
     # the same stem as the image.
     h5_path = str(p.with_suffix(".h5")).replace("images", "ground_truth")
     mat_path = p.parent.parent / "ground_truth" / f"GT_{p.stem}.mat"
+    labeled_manifest = p.parent.parent / "ground_truth" / "json" / f"{p.stem}.json"
 
     if Path(h5_path).is_file():
         with h5py.File(h5_path, "r") as gt_file:
             target = np.asarray(gt_file["density"], dtype=np.float32)
     elif mat_path.is_file():
         target = load_ground_truth(mat_path, image_path=img_path).astype(np.float32)
+    elif labeled_manifest.is_file():
+        target = _load_density_from_labeled_manifest(labeled_manifest).astype(np.float32)
     else:
         # Mall: ``.../mall_dataset/mall_gt.mat`` with frames under ``.../frames/seq_*.jpg``
         mall_gt_path = p.parent.parent / "mall_gt.mat"
@@ -229,7 +267,8 @@ def load_data(img_path: str, train: bool = True) -> tuple[Image.Image, np.ndarra
             except ValueError as err:
                 raise FileNotFoundError(
                     f"No ground truth found for {img_path}: tried {h5_path!s}, {mat_path!s}, "
-                    f"and {mall_gt_path!s} (Mall) but filename is not seq_NNNNNN.jpg ({err})"
+                    f"{labeled_manifest!s}, and {mall_gt_path!s} (Mall) but filename is not "
+                    f"seq_NNNNNN.jpg ({err})"
                 ) from err
             mat_dict = _get_mall_mat_dict(mall_gt_path)
             target = mall_load_ground_truth_density_map(
@@ -240,7 +279,8 @@ def load_data(img_path: str, train: bool = True) -> tuple[Image.Image, np.ndarra
             ).astype(np.float32)
         else:
             raise FileNotFoundError(
-                f"No ground truth found: tried {h5_path!s} and {mat_path!s} for image {img_path}"
+                f"No ground truth found: tried {h5_path!s}, {mat_path!s}, and "
+                f"{labeled_manifest!s} for image {img_path}"
             )
 
     # Data augmentation: 20 % chance of a left-right flip.

@@ -206,6 +206,7 @@ impl LabelApp {
             schema_version: 1,
             source_image: path.canonicalize().unwrap_or_else(|_| path.clone()),
             dimensions_hw: [h, w],
+            total_heads: self.clicks.len(),
             clicks_xy_image_space: self
                 .clicks
                 .iter()
@@ -516,13 +517,14 @@ fn gaussian_kernel_1d(sigma: f32) -> Vec<f32> {
 }
 
 #[inline]
-fn sample_clamped(data: &[f32], width: usize, height: usize, x: isize, y: isize) -> f32 {
-    let x = x.clamp(0, width as isize - 1).max(0) as usize;
-    let y = y.clamp(0, height as isize - 1).max(0) as usize;
-    data[y * width + x]
+fn sample_zero(data: &[f32], width: usize, height: usize, x: isize, y: isize) -> f32 {
+    if x < 0 || y < 0 || x >= width as isize || y >= height as isize {
+        return 0.0;
+    }
+    data[y as usize * width + x as usize]
 }
 
-/// Separable Gaussian blur with **clamped** edge sampling (avoids edge impulse artifacts).
+/// Separable Gaussian blur with zero-padded edge sampling.
 fn gaussian_blur_separable(data: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
     if width == 0 || height == 0 {
         return Vec::new();
@@ -537,7 +539,7 @@ fn gaussian_blur_separable(data: &[f32], width: usize, height: usize, sigma: f32
             let mut acc = 0.0_f32;
             for (ki, &kw) in kernel.iter().enumerate() {
                 let ox = x as isize + ki as isize - r;
-                acc += kw * sample_clamped(data, width, height, ox, y as isize);
+                acc += kw * sample_zero(data, width, height, ox, y as isize);
             }
             tmp[y * width + x] = acc;
         }
@@ -548,7 +550,7 @@ fn gaussian_blur_separable(data: &[f32], width: usize, height: usize, sigma: f32
             let mut acc = 0.0_f32;
             for (ki, &kw) in kernel.iter().enumerate() {
                 let oy = y as isize + ki as isize - r;
-                acc += kw * sample_clamped(&tmp, width, height, x as isize, oy);
+                acc += kw * sample_zero(&tmp, width, height, x as isize, oy);
             }
             out[y * width + x] = acc;
         }
@@ -653,6 +655,7 @@ struct Manifest {
     schema_version: u32,
     source_image: PathBuf,
     dimensions_hw: [u32; 2],
+    total_heads: usize,
     clicks_xy_image_space: Vec<Click>,
     files: Files,
     gaussian_sigma_pixels: f32,
