@@ -55,9 +55,28 @@ from rich.text import Text
 parser = argparse.ArgumentParser(description='PyTorch CSRNet')
 parser.add_argument('train_json', metavar='TRAIN', nargs='?', default=None, help='path to train json')
 parser.add_argument('test_json', metavar='TEST', nargs='?', default=None, help='path to test json')
+parser.add_argument(
+    'legacy_gpu',
+    nargs='?',
+    default=None,
+    metavar='GPU',
+    help='GPU id (optional; same as --gpu, for CSRNet-style: TRAIN TEST GPU TASK)',
+)
+parser.add_argument(
+    'legacy_task',
+    nargs='?',
+    default=None,
+    metavar='TASK',
+    help='checkpoint prefix (optional; same as --task)',
+)
 parser.add_argument('--pre', '-p', metavar='PRETRAINED', default=None, type=str, help='path to the pretrained model')
-parser.add_argument('--gpu', '-g', default='0', type=str, help='GPU id to use (default: 0)')
-parser.add_argument('--task', default='labeled_', type=str, help='checkpoint prefix (default: labeled_)')
+parser.add_argument('--gpu', '-g', default=argparse.SUPPRESS, type=str, help='GPU id to use (default: 0)')
+parser.add_argument(
+    '--task',
+    default=argparse.SUPPRESS,
+    type=str,
+    help='checkpoint prefix (default: labeled_)',
+)
 parser.add_argument('--epochs', type=int, default=400, help='number of epochs to train (default: 400)')
 parser.add_argument('--labeled-dir', type=str, default=None,
     help='path to labeled_data directory from the labeling tool; overrides train/test json')
@@ -236,6 +255,10 @@ def main():
     
     best_prec1 = 1e6
     args = parser.parse_args()
+    if not hasattr(args, 'gpu'):
+        args.gpu = args.legacy_gpu if args.legacy_gpu is not None else '0'
+    if not hasattr(args, 'task'):
+        args.task = args.legacy_task if args.legacy_task is not None else 'labeled_'
     args.original_lr = 1e-7
     args.lr = 1e-7
     # Process one image per iteration.  Crowd images have varying dimensions
