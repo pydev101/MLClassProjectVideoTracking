@@ -44,6 +44,9 @@ import dataset
 from csrnet import CSRNet
 import shutil
 
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
+
 from rich.align import Align
 from rich.box import ROUNDED
 from rich.console import Console, Group
@@ -250,6 +253,85 @@ class TrainingStatusLine:
         self.phase = "train"
 
 
+class TrainingPlotter:
+    """Renders and saves loss / MAE curves during training.
+
+    After each epoch call ``update()`` to append the latest metrics and
+    overwrite the live PNG.  Call ``save_final()`` after training to write an
+    auto-incremented copy that won't be overwritten on the next run.
+    """
+
+    FIGURES_DIR = Path(__file__).resolve().parent / "figures" / "training"
+
+    def __init__(self, task: str = "", save_dir: Optional[Path] = None) -> None:
+        self.save_dir = save_dir or self.FIGURES_DIR
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.task = task.rstrip("_")
+        self.epochs: List[int] = []
+        self.losses: List[float] = []
+        self.maes: List[float] = []
+        label = f"training_curves_{self.task}" if self.task else "training_curves"
+        self._live_path = self.save_dir / f"{label}.png"
+
+    def update(self, epoch: int, loss: float, mae: float) -> None:
+        self.epochs.append(epoch + 1)
+        self.losses.append(loss)
+        self.maes.append(mae)
+        self._save_plot(self._live_path)
+
+    def save_final(self) -> Path:
+        """Save a copy with an auto-incremented filename."""
+        label = f"training_curves_{self.task}_final" if self.task else "training_curves_final"
+        path = self._next_available(label)
+        self._save_plot(path)
+        return path
+
+    # ------------------------------------------------------------------
+
+    def _next_available(self, base: str, ext: str = ".png") -> Path:
+        candidate = self.save_dir / f"{base}{ext}"
+        counter = 1
+        while candidate.exists():
+            candidate = self.save_dir / f"{base}_{counter}{ext}"
+            counter += 1
+        return candidate
+
+    def _save_plot(self, path: Path) -> None:
+        fig = Figure(figsize=(10, 8))
+        FigureCanvasAgg(fig)
+        ax_loss, ax_mae = fig.subplots(2, 1, sharex=True)
+
+        ax_loss.plot(self.epochs, self.losses, "b-o", markersize=2, linewidth=1, label="Training Loss")
+        ax_loss.set_ylabel("Loss (MSE)")
+        title = f"Training Curves — {self.task}" if self.task else "Training Curves"
+        ax_loss.set_title(title)
+        ax_loss.legend(loc="upper right")
+        ax_loss.grid(True, alpha=0.3)
+
+        ax_mae.plot(self.epochs, self.maes, "r-o", markersize=2, linewidth=1, label="Validation MAE")
+        ax_mae.set_ylabel("MAE")
+        ax_mae.set_xlabel("Epoch")
+        ax_mae.legend(loc="upper right")
+        ax_mae.grid(True, alpha=0.3)
+
+        if self.maes:
+            best_val = min(self.maes)
+            best_idx = self.maes.index(best_val)
+            ax_mae.axhline(best_val, color="r", linestyle="--", alpha=0.4)
+            ax_mae.annotate(
+                f"Best: {best_val:.3f} (epoch {self.epochs[best_idx]})",
+                xy=(self.epochs[best_idx], best_val),
+                xytext=(10, 12),
+                textcoords="offset points",
+                fontsize=8,
+                color="red",
+                arrowprops=dict(arrowstyle="->", color="red", alpha=0.5),
+            )
+
+        fig.tight_layout()
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+
+
 def main():
     global args, best_prec1
     
@@ -351,6 +433,7 @@ def main():
 
     console = Console()
     status = TrainingStatusLine(console, args)
+    plotter = TrainingPlotter(task=args.task)
     live_ctx = Live(
         status.render(),
         console=console,
@@ -365,9 +448,7 @@ def main():
 
             # Adjust the learning rate based on the epoch
             adjust_learning_rate(optimizer, epoch)
-            # Train the model for one epoch
-            train(train_list, model, criterion, optimizer, epoch, device, status)
-            # Validate the model on the validation set
+            epoch_loss = train(train_list, model, criterion, optimizer, epoch, device, status)
             prec1 = validate(val_list, model, device, status)
 
             # Track the best (lowest) validation MAE across all epochs.
@@ -383,6 +464,9 @@ def main():
                 'best_prec1': best_prec1,
                 'optimizer' : optimizer.state_dict(),
             }, is_best, args.task)
+
+    final_path = plotter.save_final()
+    console.print(f"[bold green]Training curves saved:[/] {final_path}")
 
 def scan_labeled_dir(
     labeled_dir: str, val_fraction: float = 0.2
@@ -430,7 +514,7 @@ def train(
     epoch,
     device,
     status: Optional[TrainingStatusLine],
-):
+) -> float:
     """
     Run one training epoch over all images in ``train_list``.
 
@@ -440,6 +524,9 @@ def train(
       3. If the target and output spatial sizes disagree (odd image dimensions),
          bilinearly resize the target and rescale it so the count is preserved.
       4. Compute MSE loss, back-propagate, and update weights.
+
+    Returns:
+        Average training loss for this epoch.
     """
     losses = AverageMeter()
     batch_time = AverageMeter()
@@ -535,6 +622,8 @@ def train(
                     loss=losses,
                 )
             )
+
+    return losses.avg
 
 def validate(
     val_list,
