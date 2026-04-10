@@ -16,4 +16,4 @@ env.bak/
 
 # misc
 plots/
-*.pth
+# *.pth

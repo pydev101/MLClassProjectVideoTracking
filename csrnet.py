@@ -17,6 +17,7 @@
 # Reference paper: Li et al., "CSRNet: Dilated Convolutional Neural Networks for
 # Understanding the Highly Congested Scenes", CVPR 2018.
 
+import re
 import numpy as np
 import scipy.io as sio
 from scipy.ndimage import gaussian_filter
@@ -271,7 +272,7 @@ def load_and_process_image_with_csrnet(
         model: CSRNet,
         image_path: Union[str, Path],
         *,
-        bilinear_interpolation: bool = True,
+        bilinear_interp: bool = True,
         device: Optional[Union[str, torch.device]] = None,
     ) -> Tuple[Image.Image, np.ndarray, float]:
     """
@@ -280,6 +281,7 @@ def load_and_process_image_with_csrnet(
     Args:
         model: Loaded ``CSRNet`` instance.
         image_path: Path to an image file (RGB read via PIL).
+        bilinear_interp: If True, interpolate the density map to the original image size.
         device: Optional device for model and batch; if omitted, uses the model's current parameter device.
     
     Returns:
@@ -294,7 +296,7 @@ def load_and_process_image_with_csrnet(
     else:
         batch = batch.to(next(model.parameters()).device)
     density_map, count = csrnet_predict(model, batch)
-    if bilinear_interpolation:
+    if bilinear_interp:
         density_map = bilinear_interpolation(density_map, pil_img.size)
     return pil_img, density_map, count
 
@@ -458,6 +460,26 @@ def _mall_points_from_mat(mat: dict, img_index: int) -> np.ndarray:
     raise ValueError(f"Could not parse Mall frame entry at index {img_index}.")
 
 
+def mall_frame_index_from_image_path(image_path: Union[str, Path]) -> int:
+    """
+    Map a Mall frame filename to the 0-based index used inside ``mall_gt.mat``.
+
+    Frames follow ``seq_NNNNNN.jpg`` where *N* is the 1-based frame id (as in the
+    official Mall ``demo.m``); Python / ``frame[i]`` indexing is 0-based, so
+    ``seq_000001.jpg`` → ``0``, ``seq_000970.jpg`` → ``969``.
+    """
+    stem = Path(image_path).stem
+    m = re.fullmatch(r"seq_(\d+)", stem, flags=re.IGNORECASE)
+    if not m:
+        raise ValueError(
+            f"Expected Mall frame name like seq_000001.jpg; got filename stem {stem!r}."
+        )
+    n = int(m.group(1), 10)
+    if n < 1:
+        raise ValueError(f"Invalid Mall frame number in filename: {n}")
+    return n - 1
+
+
 def mall_load_ground_truth_density_map(
     ground_truth_path: Union[str, Path],
     *,
@@ -465,6 +487,7 @@ def mall_load_ground_truth_density_map(
     image_path: Optional[Union[str, Path]] = None,
     image_shape: Optional[Tuple[int, int]] = None,
     density_sigma: float = 4.0,
+    mat: Optional[dict] = None,
 ) -> np.ndarray:
     """
     Load Mall-style ground truth from a ``.mat`` file and build a 2D density map.
@@ -478,6 +501,8 @@ def mall_load_ground_truth_density_map(
         image_path: Optional RGB image path; height/width define map size (same as the image).
         image_shape: Optional ``(height, width)`` if you do not have ``image_path``.
         density_sigma: Gaussian sigma for smoothing; pass ``0`` to keep unsmoothed impulses only.
+        mat: Optional pre-loaded ``loadmat`` dict for this file (avoids re-reading the
+            file on every frame when training).
 
     Returns:
         np.ndarray: 2D density map ``float64`` of shape ``(H, W)``, summing to approximately
@@ -494,7 +519,8 @@ def mall_load_ground_truth_density_map(
     else:
         raise ValueError("Provide image_shape (H, W) or image_path so the density map size is known.")
 
-    mat = sio.loadmat(Path(ground_truth_path), squeeze_me=False, struct_as_record=False)
+    if mat is None:
+        mat = sio.loadmat(Path(ground_truth_path), squeeze_me=False, struct_as_record=False)
     points = _mall_points_from_mat(mat, img_index)
 
     # Build a blank image-sized canvas and stamp a unit impulse at each head

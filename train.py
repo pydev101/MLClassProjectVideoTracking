@@ -15,6 +15,11 @@ pairs loaded through ``dataset.listDataset``.  The training loop:
 Usage example:
     python train.py path/to/train.json path/to/val.json 0 ./runs/exp1_ --epochs 400
 
+If ``train_json`` is a **combined** file (JSON object with ``"train"`` and ``"test"``
+lists), both splits are read from that file. Pass the same path again as
+``test_json`` to satisfy the CLI, or any path (the second file is ignored when
+the first is combined).
+
 Positional args: train_json, test_json, gpu (CUDA device id), task (checkpoint prefix).
 """
 
@@ -72,10 +77,22 @@ def main():
     args.print_freq = 30
 
     # Load the training and validation lists from the JSON files
-    with open(args.train_json, 'r') as outfile:        
-        train_list = json.load(outfile)
-    with open(args.test_json, 'r') as outfile:       
-        val_list = json.load(outfile)
+    with open(args.train_json, "r", encoding="utf-8") as outfile:
+        train_blob = json.load(outfile)
+    if isinstance(train_blob, dict) and "train" in train_blob and "test" in train_blob:
+        train_list = train_blob["train"]
+        val_list = train_blob["test"]
+        p_train = os.path.normcase(os.path.abspath(args.train_json))
+        p_test = os.path.normcase(os.path.abspath(args.test_json))
+        if p_train != p_test:
+            print(
+                "=> train_json is a combined file (train+test keys); ignoring TEST path:",
+                args.test_json,
+            )
+    else:
+        train_list = train_blob
+        with open(args.test_json, "r", encoding="utf-8") as outfile:
+            val_list = json.load(outfile)
     
     # Pin the GPU visible to this process and seed all RNGs for reproducibility.
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu

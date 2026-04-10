@@ -14,6 +14,9 @@ Parts A and B are included in this folder:
 | `part_A_test.json`  | A (dense) | test  | 182 |
 | `part_B_train.json` | B (sparse) | train | 400 |
 | `part_B_test.json`  | B (sparse) | test  | 316 |
+| `mall_train.json`   | Mall       | train | 1300 |
+| `mall_test.json`    | Mall       | test  | 700 |
+| `combined.json`     | A + B + Mall | both | 2000 train / 1198 test |
 
 Each JSON file is a flat list of image paths:
 
@@ -28,6 +31,41 @@ Each JSON file is a flat list of image paths:
 Ground truth (`.mat` files) is resolved automatically — `dataset.py` looks for
 `GT_<stem>.mat` in a sibling `ground_truth/` folder next to `images/`.
 
+#### Mall dataset (`mall_dataset/`)
+
+Place the official Mall files under `mall_dataset/mall_dataset/`:
+
+- `mall_gt.mat` — head locations (same folder as in the dataset release).
+- `frames/seq_000001.jpg` … `seq_002000.jpg` — RGB frames.
+
+`dataset.py` detects Mall when `mall_gt.mat` sits **next to** the `frames/` directory
+and each image is named `seq_NNNNNN.jpg` (the number is the 1-based frame id from
+the dataset; the loader maps it to the correct row in `mall_gt.mat`).
+
+The bundled `mall_train.json` / `mall_test.json` use a **1300 / 700** split
+(frames 1–1300 train, 1301–2000 test). Regenerate them if you need a different split.
+
+#### Combined file (`combined.json`)
+
+`combined.json` is a single JSON **object** (not a plain list) with two keys:
+
+```json
+{
+  "train": [ /* Part A train + Part B train + Mall train */ ],
+  "test": [ /* Part A test + Part B test + Mall test */ ]
+}
+```
+
+Run `python training/build_combined_json.py` after editing any of the per-dataset
+JSONs to refresh `combined.json`.
+
+Train with the same path twice (the second positional is ignored when the first
+file is in combined format):
+
+```bash
+python train.py training/combined.json training/combined.json 0 all_ --epochs 400
+```
+
 ### 2. Run training
 
 From the **project root** directory:
@@ -38,6 +76,9 @@ python train.py training/part_A_train.json training/part_A_test.json 0 partA_ --
 
 # Train on Part B (sparse crowds), GPU 0
 python train.py training/part_B_train.json training/part_B_test.json 0 partB_ --epochs 400
+
+# Train on Mall (after adding mall_gt.mat and frames under mall_dataset/mall_dataset/)
+python train.py training/mall_train.json training/mall_test.json 0 mall_ --epochs 400
 ```
 
 #### Argument order

@@ -6,7 +6,8 @@ from plotting_tools import *
 
 
 def example():
-    weights_a = Path("./models/csr_net_base/PartBmodel_best.pth")
+    # checkpoint = Path("./models/csr_net_base/PartBmodel_best.pth")
+    checkpoint = Path("./testmodel_best.pth")
     img_path = Path("./ShanghaiTech_Crowd_Counting_Dataset/part_A_final/test_data/images/IMG_2.jpg")
     # img_path = Path("./test_images/1.jpeg")
 
@@ -17,7 +18,7 @@ def example():
     # To use random (untrained) weights for a quick sanity check:
     # model = CSRNet(load_weights=True)
     # To use a trained checkpoint:
-    model = load_csrnet_model(weights_a, map_location="cpu")
+    model = load_csrnet_model(checkpoint, map_location="cpu")
     img, density_map, estimated_crowd_count = load_and_process_image_with_csrnet(model, img_path)
 
     # Ground-truth .mat files live in a sibling "ground_truth" directory.

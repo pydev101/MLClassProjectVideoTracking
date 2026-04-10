@@ -2,13 +2,17 @@
 CSRNet training dataset.
 
 This module provides a PyTorch ``Dataset`` that pairs each crowd image with its
-corresponding density-map target.  It supports two ground-truth formats:
+corresponding density-map target.  It supports three ground-truth formats:
 
   1. **HDF5** (CSRNet-pytorch convention) – ``<stem>.h5`` with a ``density``
      dataset, stored under a ``ground_truth/`` folder parallel to ``images/``.
   2. **MATLAB** (ShanghaiTech convention) – ``GT_<stem>.mat`` containing head
      annotations, converted on-the-fly to a Gaussian density map by
-     ``csrnet.load_ground_truth``.
+     ``load_ground_truth``.
+  3. **MATLAB** (Mall convention) – a single ``mall_gt.mat`` next to the
+     ``frames/`` directory, with images named ``seq_NNNNNN.jpg``; uses
+     ``csrnet.mall_load_ground_truth_density_map`` (with an in-memory cache so
+     the ``.mat`` file is not re-read every frame).
 
 Image paths are supplied either as a JSON file (list of strings or list of
 ``{"img": ...}`` dicts) or directly as a Python sequence.
@@ -36,6 +40,18 @@ from scipy.ndimage import gaussian_filter
 from scipy.io.matlab._mio5_params import mat_struct
 from torch.utils.data import Dataset
 from typing import Optional, Tuple
+
+from csrnet import mall_frame_index_from_image_path, mall_load_ground_truth_density_map
+
+# One loaded dict per ``mall_gt.mat`` path (large file; shared across all frames).
+_mall_mat_cache: dict[str, dict] = {}
+
+
+def _get_mall_mat_dict(gt_path: Path) -> dict:
+    key = str(gt_path.resolve())
+    if key not in _mall_mat_cache:
+        _mall_mat_cache[key] = sio.loadmat(gt_path, squeeze_me=False, struct_as_record=False)
+    return _mall_mat_cache[key]
 
 
 def load_ground_truth(
@@ -205,9 +221,27 @@ def load_data(img_path: str, train: bool = True) -> tuple[Image.Image, np.ndarra
     elif mat_path.is_file():
         target = load_ground_truth(mat_path, image_path=img_path).astype(np.float32)
     else:
-        raise FileNotFoundError(
-            f"No ground truth found: tried {h5_path!s} and {mat_path!s} for image {img_path}"
-        )
+        # Mall: ``.../mall_dataset/mall_gt.mat`` with frames under ``.../frames/seq_*.jpg``
+        mall_gt_path = p.parent.parent / "mall_gt.mat"
+        if mall_gt_path.is_file():
+            try:
+                img_index = mall_frame_index_from_image_path(p)
+            except ValueError as err:
+                raise FileNotFoundError(
+                    f"No ground truth found for {img_path}: tried {h5_path!s}, {mat_path!s}, "
+                    f"and {mall_gt_path!s} (Mall) but filename is not seq_NNNNNN.jpg ({err})"
+                ) from err
+            mat_dict = _get_mall_mat_dict(mall_gt_path)
+            target = mall_load_ground_truth_density_map(
+                mall_gt_path,
+                img_index=img_index,
+                image_path=img_path,
+                mat=mat_dict,
+            ).astype(np.float32)
+        else:
+            raise FileNotFoundError(
+                f"No ground truth found: tried {h5_path!s} and {mat_path!s} for image {img_path}"
+            )
 
     # Data augmentation: 20 % chance of a left-right flip.
     if train:
