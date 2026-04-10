@@ -25,6 +25,7 @@ from torchvision import transforms
 from typing import Union, List, Any, Tuple, Optional, cast
 from pathlib import Path
 import torch.nn as nn
+import torch.nn.functional as F
 import torch
 from torchvision import models
 from scipy.io.matlab._mio5_params import mat_struct
@@ -256,10 +257,10 @@ def bilinear_interpolation(
         raise ValueError("original_image (height, width) entries must be >= 1")
 
     x = torch.from_numpy(arr.astype(np.float32, copy=False))[None, None, :, :]
-    y = torch.nn.functional.interpolate(
-        x, size=(th, tw), mode="bilinear", align_corners=False
-    )
-    out = y.squeeze(0).squeeze(0).numpy()
+    tsum = x.sum()
+    x = F.interpolate(x, size=(th, tw), mode="bilinear", align_corners=False)
+    x = x * (tsum / (x.sum() + 1e-8))
+    out = x.squeeze(0).squeeze(0).numpy()
 
     if np.issubdtype(arr.dtype, np.floating):
         return out.astype(arr.dtype, copy=False)
@@ -371,7 +372,7 @@ def _shanghaitech_points_from_mat(mat: dict) -> np.ndarray:
             f"Could not parse ShanghaiTech image_info (type after unwrap: {type(cur).__name__})."
         ) from err
 
-def load_ground_truth_density_map(
+def tech_load_ground_truth_density_map(
         ground_truth_path: Union[str, Path],
         *,
         image_path: Optional[Union[str, Path]] = None,
@@ -410,6 +411,94 @@ def load_ground_truth_density_map(
 
     # Build a blank image-sized canvas and stamp a unit impulse at each head
     # coordinate.  After Gaussian smoothing, each impulse integrates to ~1.0,
+    # so the map's total sum ≈ the head count.
+    density = np.zeros((h, w), dtype=np.float64)
+    for x, y in points:
+        xi, yi = int(np.floor(x)), int(np.floor(y))
+        if 0 <= yi < h and 0 <= xi < w:
+            density[yi, xi] += 1.0
+
+    # Isotropic Gaussian smoothing converts the sparse impulse map into a
+    # continuous density map
+    if density_sigma > 0.0:
+        density = gaussian_filter(density, sigma=float(density_sigma))
+
+    return density
+
+
+
+
+
+################################################################################################
+# Ground-truth loading (Mall .mat format). Same as above, but for the mall dataset
+#
+################################################################################################
+
+def _mall_points_from_mat(mat: dict, img_index: int) -> np.ndarray:
+    """Parse Mall-style ``mall_gt.mat`` head locations; returns ``(N, 2)`` float array (x, y)."""
+    if "frame" not in mat:
+        raise KeyError("Expected 'frame' in .mat (Mall GT format).")
+    info = mat["frame"]
+
+    if isinstance(info, np.ndarray) and info.ndim == 2 and info.shape[0] == 1:
+        info = info[0]
+
+    cur: Any = info[img_index]
+    for _ in range(10):
+        if isinstance(cur, np.ndarray) and cur.shape == (1, 1):
+            cur = cur[0, 0]
+            continue
+        break
+
+    if isinstance(cur, mat_struct):
+        if not hasattr(cur, "loc"):
+            raise ValueError("Mall mat_struct has no 'loc' field.")
+        return _normalize_gt_points(_unwrap_location_array(cur.loc))
+
+    raise ValueError(f"Could not parse Mall frame entry at index {img_index}.")
+
+
+def mall_load_ground_truth_density_map(
+    ground_truth_path: Union[str, Path],
+    *,
+    img_index: int,
+    image_path: Optional[Union[str, Path]] = None,
+    image_shape: Optional[Tuple[int, int]] = None,
+    density_sigma: float = 4.0,
+) -> np.ndarray:
+    """
+    Load Mall-style ground truth from a ``.mat`` file and build a 2D density map.
+
+    Annotations are head locations; each receives a unit impulse, then an isotropic Gaussian
+    with standard deviation ``density_sigma`` is applied (typical for CSRNet-style targets).
+
+    Args:
+        ground_truth_path: Path to ``mall_gt.mat`` (must contain ``frame``).
+        img_index: Zero-based frame index in Python.
+        image_path: Optional RGB image path; height/width define map size (same as the image).
+        image_shape: Optional ``(height, width)`` if you do not have ``image_path``.
+        density_sigma: Gaussian sigma for smoothing; pass ``0`` to keep unsmoothed impulses only.
+
+    Returns:
+        np.ndarray: 2D density map ``float64`` of shape ``(H, W)``, summing to approximately
+        the head count for positive ``density_sigma``.
+
+    Raises:
+        ValueError: If neither ``image_path`` nor ``image_shape`` is given.
+    """
+    if image_shape is not None:
+        h, w = int(image_shape[0]), int(image_shape[1])
+    elif image_path is not None:
+        with Image.open(image_path) as im:
+            w, h = im.size
+    else:
+        raise ValueError("Provide image_shape (H, W) or image_path so the density map size is known.")
+
+    mat = sio.loadmat(Path(ground_truth_path), squeeze_me=False, struct_as_record=False)
+    points = _mall_points_from_mat(mat, img_index)
+
+    # Build a blank image-sized canvas and stamp a unit impulse at each head
+    # coordinate. After Gaussian smoothing, each impulse integrates to ~1.0,
     # so the map's total sum ≈ the head count.
     density = np.zeros((h, w), dtype=np.float64)
     for x, y in points:

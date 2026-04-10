@@ -22,47 +22,46 @@ import argparse
 import json
 import os
 import time
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms
-
 import dataset
 from csrnet import CSRNet
-from utils import save_checkpoint
+import shutil
+from typing import Any, Dict
+
 
 parser = argparse.ArgumentParser(description='PyTorch CSRNet')
-
-parser.add_argument('train_json', metavar='TRAIN',
-                    help='path to train json')
-parser.add_argument('test_json', metavar='TEST',
-                    help='path to test json')
-
-parser.add_argument('--pre', '-p', metavar='PRETRAINED', default=None,type=str,
-                    help='path to the pretrained model')
-
-parser.add_argument('gpu',metavar='GPU', type=str,
-                    help='GPU id to use.')
-
-parser.add_argument('task',metavar='TASK', type=str,
-                    help='task id to use.')
-
-parser.add_argument('--epochs', type=int, default=400,
-                    help='number of epochs to train (default: 400)')
+parser.add_argument('train_json', metavar='TRAIN', help='path to train json')
+parser.add_argument('test_json', metavar='TEST', help='path to test json')
+parser.add_argument('--pre', '-p', metavar='PRETRAINED', default=None,type=str, help='path to the pretrained model')
+parser.add_argument('gpu',metavar='GPU', type=str, help='GPU id to use.')
+parser.add_argument('task',metavar='TASK', type=str, help='task id to use.')
+parser.add_argument('--epochs', type=int, default=400, help='number of epochs to train (default: 400)')
 
 def main():
-    global args,best_prec1
+    global args, best_prec1
     
     best_prec1 = 1e6
-    
     args = parser.parse_args()
     args.original_lr = 1e-7
     args.lr = 1e-7
+    # Process one image per iteration.  Crowd images have varying dimensions
+    # and can't easily be stacked into a uniform tensor, so batch_size=1 is
+    # standard for CSRNet (true stochastic gradient descent).
     args.batch_size    = 1
+    # SGD momentum: 95 % of the previous gradient direction carries into the
+    # current update, smoothing out noisy per-image gradients and accelerating
+    # convergence through flat regions of the loss landscape.
     args.momentum      = 0.95
+    # Weight decay (L2 regularisation): penalises large weights to reduce
+    # overfitting.  Each update effectively shrinks every weight by
+    # (1 - lr * decay) before applying the gradient.
     args.decay         = 5*1e-4
+    # Epoch to start from; overwritten when resuming from a checkpoint.
     args.start_epoch   = 0
+
     # Piecewise LR schedule: at each epoch in `steps`, multiply LR by the
     # corresponding entry in `scales`.  The first entry (-1) means "from the
     # start", so the initial LR is used unchanged until epoch 1.
@@ -72,6 +71,7 @@ def main():
     args.seed = time.time()
     args.print_freq = 30
 
+    # Load the training and validation lists from the JSON files
     with open(args.train_json, 'r') as outfile:        
         train_list = json.load(outfile)
     with open(args.test_json, 'r') as outfile:       
@@ -108,17 +108,24 @@ def main():
                 checkpoint = torch.load(args.pre, map_location=device)
             args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
+            # load weight and biases
             model.load_state_dict(checkpoint['state_dict'])
+            # load optimizer state (gradients and whatnot)
             optimizer.load_state_dict(checkpoint['optimizer'])
             print("=> loaded checkpoint '{}' (epoch {})".format(args.pre, checkpoint['epoch']))
         else:
             print("=> no checkpoint found at '{}'".format(args.pre))
-            
+        
+
+    # Train the model for the specified number of epochs
     for epoch in range(args.start_epoch, args.epochs):
         
+        # Adjust the learning rate based on the epoch
         adjust_learning_rate(optimizer, epoch)
         
+        # Train the model for one epoch
         train(train_list, model, criterion, optimizer, epoch, device)
+        # Validate the model on the validation set
         prec1 = validate(val_list, model, device)
         
         # Track the best (lowest) validation MAE across all epochs.
@@ -148,7 +155,7 @@ def train(train_list, model, criterion, optimizer, epoch, device):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     
-    
+    # Create a data loader for the training set
     train_loader = torch.utils.data.DataLoader(
         dataset.listDataset(train_list,
             shuffle=True,
@@ -165,16 +172,21 @@ def train(train_list, model, criterion, optimizer, epoch, device):
         )
     print('epoch %d, processed %d samples, lr %.10f' % (epoch, epoch * len(train_loader.dataset), args.lr))
     
+    # Set the model to training mode
     model.train()
     end = time.time()
     
-    for i,(img, target)in enumerate(train_loader):
+    # for each image in the training set, 
+    for i,(img, target) in enumerate(train_loader):
         data_time.update(time.time() - end)
         
+        # Move the image and target to the device
         img = img.to(device)
+        # Run the model forward pass
         output = model(img)
-
+        # Move the target to the device
         target = target.to(device)
+
         # Ensure target is 4-D [N, 1, H, W] to match network output.
         if target.dim() == 3:
             target = target.unsqueeze(0)
@@ -190,14 +202,19 @@ def train(train_list, model, criterion, optimizer, epoch, device):
 
         loss = criterion(output, target)
         
+        # back propagation and update weights
         losses.update(loss.item(), img.size(0))
+        # zero the gradients
         optimizer.zero_grad()
+        # back propagate the loss
         loss.backward()
+        # update weights
         optimizer.step()    
         
         batch_time.update(time.time() - end)
         end = time.time()
         
+        # print the loss every 30 iterations
         if i % args.print_freq == 0:
             print('Epoch: [{0}][{1}/{2}]\t'
                     'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
@@ -219,11 +236,11 @@ def validate(val_list, model, device):
     print("begin test")
     test_loader = torch.utils.data.DataLoader(
     dataset.listDataset(val_list,
-                   shuffle=False,
-                   transform=transforms.Compose([
-                       transforms.ToTensor(),transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225]),
-                   ]),  train=False),
+                    shuffle=False,
+                    transform=transforms.Compose([
+                        transforms.ToTensor(),transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225]),
+                    ]),  train=False),
     batch_size=args.batch_size)    
     
     model.eval()
@@ -249,8 +266,7 @@ def validate(val_list, model, device):
         mae += torch.abs(output.sum() - target.sum()).item()
         
     mae = mae/len(test_loader)    
-    print(' * MAE {mae:.3f} '
-              .format(mae=mae))
+    print(' * MAE {mae:.3f} '.format(mae=mae))
 
     return mae    
         
@@ -278,6 +294,23 @@ def adjust_learning_rate(optimizer, epoch):
             break
     for param_group in optimizer.param_groups:
         param_group['lr'] = args.lr
+
+def save_checkpoint(state: Dict[str, Any], is_best: bool, task_id: str, filename: str = "checkpoint.pth") -> None:
+    """Save training checkpoint; copy to ``model_best.pth`` when ``is_best``.
+
+    Files are written to ``<task_id><filename>`` (e.g. ``./runs/exp1_checkpoint.pth``).
+    The ``task_id`` prefix lets you keep multiple experiments side-by-side in
+    the same directory.
+    """
+    path = task_id + filename
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    torch.save(state, path, _use_new_zipfile_serialization=True)
+    if is_best:
+        best = task_id + "model_best.pth"
+        shutil.copyfile(path, best)
+
         
 class AverageMeter(object):
     """Tracks a running average of a scalar value (e.g. loss, timing).

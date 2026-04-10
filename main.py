@@ -24,7 +24,7 @@ def example():
     gt_path = img_path.parent.parent / "ground_truth" / f"GT_{img_path.stem}.mat"
 
     if gt_path.exists():
-        gt_density = load_ground_truth(gt_path, image_path=img_path)
+        gt_density = tech_load_ground_truth_density_map(gt_path, image_path=img_path)
         plot_ground_truth_density(img, gt_density)
 
     # The network output is 1/8 of the input size; up-scale for display.

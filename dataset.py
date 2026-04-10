@@ -29,11 +29,117 @@ from typing import Any, List, Sequence, Union
 
 import h5py
 import numpy as np
+import scipy.io as sio
 import torch
 from PIL import Image
+from scipy.ndimage import gaussian_filter
+from scipy.io.matlab._mio5_params import mat_struct
 from torch.utils.data import Dataset
+from typing import Optional, Tuple
 
-from csrnet import load_ground_truth
+
+def load_ground_truth(
+    ground_truth_path: Union[str, Path],
+    *,
+    image_path: Optional[Union[str, Path]] = None,
+    image_shape: Optional[Tuple[int, int]] = None,
+    density_sigma: float = 4.0,
+) -> np.ndarray:
+    """Load ShanghaiTech-style ground truth from a ``.mat`` file and build a
+    2D density map.
+
+    Each head annotation becomes a unit impulse on an image-sized canvas, then
+    an isotropic Gaussian (sigma=``density_sigma``) is applied so each head
+    integrates to ~1.0 and the map sum ≈ head count.
+
+    Args:
+        ground_truth_path: Path to ``GT_*.mat`` (must contain ``image_info``).
+        image_path: RGB image whose dimensions define the map size.
+        image_shape: ``(height, width)`` alternative to ``image_path``.
+        density_sigma: Gaussian sigma; pass 0 for raw impulses.
+    """
+    if image_shape is not None:
+        h, w = int(image_shape[0]), int(image_shape[1])
+    elif image_path is not None:
+        with Image.open(image_path) as im:
+            w, h = im.size
+    else:
+        raise ValueError("Provide image_shape (H, W) or image_path so the density map size is known.")
+
+    mat = sio.loadmat(Path(ground_truth_path), squeeze_me=False, struct_as_record=False)
+    points = _shanghaitech_points_from_mat(mat)
+
+    density = np.zeros((h, w), dtype=np.float64)
+    for x, y in points:
+        xi, yi = int(np.floor(x)), int(np.floor(y))
+        if 0 <= yi < h and 0 <= xi < w:
+            density[yi, xi] += 1.0
+
+    if density_sigma > 0.0:
+        density = gaussian_filter(density, sigma=float(density_sigma))
+
+    return density
+
+
+def _normalize_gt_points(points: np.ndarray) -> np.ndarray:
+    """Ensure head annotations are a float64 array of shape ``(N, 2)`` — (x, y)."""
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.size == 0:
+        return np.zeros((0, 2), dtype=np.float64)
+    if pts.ndim == 1:
+        pts = pts.reshape(-1, 2)
+    if pts.shape[-1] != 2:
+        raise ValueError(f"Expected 2 columns (x, y); got shape {pts.shape}")
+    return pts.reshape(-1, 2)
+
+
+def _unwrap_location_array(loc: Any) -> np.ndarray:
+    """Peel (1,1) object-cell wrappers until the coordinate array is reached."""
+    cur = loc
+    for _ in range(8):
+        if isinstance(cur, np.ndarray) and cur.shape == (1, 1):
+            cur = cur[0, 0]
+            continue
+        break
+    return np.asarray(cur, dtype=np.float64)
+
+
+def _shanghaitech_points_from_mat(mat: dict) -> np.ndarray:
+    """Extract (N, 2) head coordinates from a ShanghaiTech ``GT_*.mat``."""
+    if "image_info" not in mat:
+        raise KeyError("Expected 'image_info' in .mat (ShanghaiTech GT format).")
+    info = mat["image_info"]
+
+    # squeeze_me=True, struct_as_record=True produces a 0-d structured array.
+    if isinstance(info, np.ndarray) and info.shape == () and info.dtype.names:
+        names = info.dtype.names
+        if "location" in names:
+            row = dict(zip(names, info.item()))
+            return _normalize_gt_points(_unwrap_location_array(row["location"]))
+        raise ValueError("Structured image_info has no 'location' field.")
+
+    # Default loadmat: nested (1,1) arrays ending in mat_struct with .location
+    cur: Any = info
+    for _ in range(10):
+        if isinstance(cur, np.ndarray) and cur.shape == (1, 1):
+            cur = cur[0, 0]
+            continue
+        break
+
+    if isinstance(cur, mat_struct):
+        if not hasattr(cur, "location"):
+            raise ValueError("ShanghaiTech mat_struct has no 'location' field.")
+        return _normalize_gt_points(_unwrap_location_array(cur.location))
+
+    # Legacy cell layout fallback.
+    try:
+        pts = mat["image_info"][0, 0][0, 0][0]
+        return _normalize_gt_points(_unwrap_location_array(pts))
+    except (TypeError, IndexError, KeyError) as err:
+        raise ValueError(
+            f"Could not parse ShanghaiTech image_info (type: {type(cur).__name__})."
+        ) from err
+
 
 
 def _normalize_train_list(root: Union[str, Sequence[Any]]) -> List[str]:
