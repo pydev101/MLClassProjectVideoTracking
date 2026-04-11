@@ -205,7 +205,7 @@ def load_csrnet_model(weights_path: Union[str, Path], *, map_location: Optional[
         model.load_state_dict(checkpoint["state_dict"])
     else:
         model.load_state_dict(checkpoint)
-    # Set the model to evaluation mode (since not in training mode here)
+    model.to(map_location)
     model.eval()
     return model
 

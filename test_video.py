@@ -23,22 +23,20 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from queue import Queue
+from threading import Thread
+from typing import List, Optional
 
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from matplotlib import cm as CM
-from PIL import Image
 
-from csrnet import (
-    CSRNet,
-    bilinear_interpolation,
-    csrnet_image_transform,
-    csrnet_predict,
-    load_csrnet_model,
-    pil_image_to_csrnet_batch,
-)
+from csrnet import load_csrnet_model
+
+_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 
 def density_to_colormap(density: np.ndarray, cmap=CM.jet) -> np.ndarray:
@@ -93,6 +91,42 @@ def make_writer(
     return writer
 
 
+def _read_batches(cap: cv2.VideoCapture, batch_size: int, q: "Queue[Optional[List[np.ndarray]]]") -> None:
+    """Background thread: read frames and enqueue them in batches."""
+    while True:
+        frames: List[np.ndarray] = []
+        for _ in range(batch_size):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frames.append(frame)
+        if frames:
+            q.put(frames)
+        if len(frames) < batch_size:
+            q.put(None)
+            break
+
+
+def _frames_to_batch(frames_bgr: List[np.ndarray], device: torch.device) -> torch.Tensor:
+    """Convert BGR uint8 frames directly to a normalised (N,3,H,W) tensor."""
+    tensors = []
+    for f in frames_bgr:
+        rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
+        t = torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1).float().div_(255.0)
+        tensors.append(t)
+    batch = torch.stack(tensors)
+    batch.sub_(_MEAN).div_(_STD)
+    return batch.to(device, non_blocking=True)
+
+
+def _upscale_densities(density_batch: torch.Tensor, h: int, w: int) -> torch.Tensor:
+    """Bilinear-upscale a (N,1,h',w') density batch to (N,1,H,W), preserving counts."""
+    sums = density_batch.flatten(1).sum(1, keepdim=True).unsqueeze(-1).unsqueeze(-1)
+    up = F.interpolate(density_batch, size=(h, w), mode="bilinear", align_corners=False)
+    up_sums = up.flatten(1).sum(1, keepdim=True).unsqueeze(-1).unsqueeze(-1)
+    return up * (sums / (up_sums + 1e-8))
+
+
 def process_video(
     video_path: str,
     weights_path: str,
@@ -103,6 +137,7 @@ def process_video(
     write_heatmap: bool = False,
     write_sidebyside: bool = False,
     output_dir: Optional[str] = None,
+    batch_size: int = 8,
 ) -> None:
     video = Path(video_path)
     if not video.is_file():
@@ -115,7 +150,11 @@ def process_video(
 
     model = load_csrnet_model(weights_path, map_location=device)
     dev = next(model.parameters()).device
-    transform = csrnet_image_transform()
+
+    if dev.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+
+    use_amp = dev.type == "cuda"
 
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
@@ -150,58 +189,76 @@ def process_video(
     frame_idx = 0
     t0 = time.time()
     print(f"Processing {video.name}  ({w}x{h} @ {fps:.1f} fps, {total_frames} frames)")
-    print(f"Device: {dev}")
+    print(f"Device: {dev}  |  batch_size: {batch_size}  |  AMP: {use_amp}")
     print(f"Outputs: {', '.join(writers.keys())}")
+
+    q: Queue[Optional[List[np.ndarray]]] = Queue(maxsize=3)
+    reader = Thread(target=_read_batches, args=(cap, batch_size, q), daemon=True)
+    reader.start()
 
     try:
         while True:
-            ret, frame_bgr = cap.read()
-            if not ret:
+            frames_bgr = q.get()
+            if frames_bgr is None:
                 break
 
-            pil_img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-            batch = pil_image_to_csrnet_batch(pil_img, transform).to(dev)
-            density, count = csrnet_predict(model, batch)
-            density_full = bilinear_interpolation(density, (h, w))
+            batch_tensor = _frames_to_batch(frames_bgr, dev)
 
-            if "overlay" in writers:
-                out = overlay_heatmap(frame_bgr, density_full, alpha)
-                burn_count_text(out, count)
-                writers["overlay"].write(out)
+            with torch.no_grad():
+                if use_amp:
+                    with torch.amp.autocast("cuda"):
+                        outputs = model(batch_tensor)
+                    outputs = outputs.float()
+                else:
+                    outputs = model(batch_tensor)
 
-            if "heatmap" in writers:
-                heat = density_to_colormap(density_full)
-                heat = cv2.resize(heat, (w, h))
-                burn_count_text(heat, count)
-                writers["heatmap"].write(heat)
+            densities_full = _upscale_densities(outputs, h, w)
+            densities_np = densities_full.squeeze(1).cpu().numpy()
+            counts = outputs.flatten(1).sum(1).cpu().numpy()
 
-            if "sidebyside" in writers:
-                heat = density_to_colormap(density_full)
-                heat = cv2.resize(heat, (w, h))
-                burn_count_text(heat, count)
-                orig = frame_bgr.copy()
-                burn_count_text(orig, count)
-                sbs = np.hstack([orig, heat])
-                writers["sidebyside"].write(sbs)
+            for i, frame_bgr in enumerate(frames_bgr):
+                density_full = densities_np[i]
+                count = float(counts[i])
 
-            frame_idx += 1
-            if frame_idx % 50 == 0 or frame_idx == total_frames:
-                elapsed = time.time() - t0
-                fps_actual = frame_idx / elapsed if elapsed > 0 else 0
-                pct = frame_idx / total_frames * 100 if total_frames else 0
-                print(
-                    f"  frame {frame_idx}/{total_frames}"
-                    f"  ({pct:5.1f}%)  {fps_actual:.1f} fps",
-                    flush=True,
-                )
+                if "overlay" in writers:
+                    out = overlay_heatmap(frame_bgr, density_full, alpha)
+                    burn_count_text(out, count)
+                    writers["overlay"].write(out)
+
+                if "heatmap" in writers:
+                    heat = density_to_colormap(density_full)
+                    heat = cv2.resize(heat, (w, h))
+                    burn_count_text(heat, count)
+                    writers["heatmap"].write(heat)
+
+                if "sidebyside" in writers:
+                    heat = density_to_colormap(density_full)
+                    heat = cv2.resize(heat, (w, h))
+                    burn_count_text(heat, count)
+                    orig = frame_bgr.copy()
+                    burn_count_text(orig, count)
+                    sbs = np.hstack([orig, heat])
+                    writers["sidebyside"].write(sbs)
+
+                frame_idx += 1
+                if frame_idx % 50 == 0 or frame_idx == total_frames:
+                    elapsed = time.time() - t0
+                    fps_actual = frame_idx / elapsed if elapsed > 0 else 0
+                    pct = frame_idx / total_frames * 100 if total_frames else 0
+                    print(
+                        f"  frame {frame_idx}/{total_frames}"
+                        f"  ({pct:5.1f}%)  {fps_actual:.1f} fps",
+                        flush=True,
+                    )
     finally:
+        reader.join(timeout=2)
         cap.release()
         for wr in writers.values():
             wr.release()
 
     elapsed = time.time() - t0
     print(f"\nDone — {frame_idx} frames in {elapsed:.1f}s ({frame_idx/elapsed:.1f} fps)")
-    for tag, wr in writers.items():
+    for tag in writers:
         print(f"  {out_dir / f'{stem}_{tag}.mp4'}")
 
 
@@ -219,6 +276,7 @@ def main() -> None:
         help="Torch device (default: cpu). Use 'cuda' for GPU.",
     )
     parser.add_argument("--alpha", type=float, default=0.45, help="Overlay opacity (0-1).")
+    parser.add_argument("--batch-size", type=int, default=8, help="Frames per inference batch (default: 8).")
     parser.add_argument("--output-dir", default=None, help="Directory for output videos (default: same as input).")
 
     mode = parser.add_argument_group("output modes (at least one required)")
@@ -240,6 +298,7 @@ def main() -> None:
         write_heatmap=args.heatmap,
         write_sidebyside=args.sidebyside,
         output_dir=args.output_dir,
+        batch_size=args.batch_size,
     )
 
 
