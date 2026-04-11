@@ -40,12 +40,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms
 
+import numpy as np
+from PIL import Image
+
 import dataset
-from csrnet import CSRNet
+from csrnet import CSRNet, pil_image_to_csrnet_batch, csrnet_predict, bilinear_interpolation
 import shutil
 
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from matplotlib import pyplot as plt
 
 from rich.align import Align
 from rich.box import ROUNDED
@@ -278,12 +282,14 @@ class TrainingPlotter:
         self.losses.append(loss)
         self.maes.append(mae)
         self._save_plot(self._live_path)
+        self._save_json(self._live_path.with_suffix(".json"))
 
     def save_final(self) -> Path:
         """Save a copy with an auto-incremented filename."""
         label = f"training_curves_{self.task}_final" if self.task else "training_curves_final"
         path = self._next_available(label)
         self._save_plot(path)
+        self._save_json(path.with_suffix(".json"))
         return path
 
     # ------------------------------------------------------------------
@@ -318,18 +324,80 @@ class TrainingPlotter:
             best_val = min(self.maes)
             best_idx = self.maes.index(best_val)
             ax_mae.axhline(best_val, color="r", linestyle="--", alpha=0.4)
-            ax_mae.annotate(
+            ax_mae.text(
+                0.98, 0.95,
                 f"Best: {best_val:.3f} (epoch {self.epochs[best_idx]})",
-                xy=(self.epochs[best_idx], best_val),
-                xytext=(10, 12),
-                textcoords="offset points",
-                fontsize=8,
-                color="red",
-                arrowprops=dict(arrowstyle="->", color="red", alpha=0.5),
+                transform=ax_mae.transAxes,
+                ha="right", va="top",
+                fontsize=8, color="red",
             )
 
         fig.tight_layout()
         fig.savefig(path, dpi=150, bbox_inches="tight")
+
+    def _save_json(self, path: Path) -> None:
+        best_idx = int(np.argmin(self.maes)) if self.maes else 0
+        data = {
+            "task": self.task,
+            "epochs": self.epochs,
+            "losses": self.losses,
+            "maes": self.maes,
+            "best_mae": self.maes[best_idx] if self.maes else None,
+            "best_epoch": self.epochs[best_idx] if self.maes else None,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+
+SAMPLE_IMAGE = Path(__file__).resolve().parent / "test_images" / "crowd.jpg"
+
+
+def _save_sample_inference(model: nn.Module, device: torch.device, task: str, epoch: int) -> None:
+    """Run inference on the sample crowd image and save overlay + heatmap."""
+    if not SAMPLE_IMAGE.exists():
+        return
+
+    tag = task.rstrip("_") or "default"
+    save_dir = Path(__file__).resolve().parent / "figures" / "training" / tag
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    was_training = model.training
+    model.eval()
+    img = Image.open(SAMPLE_IMAGE).convert("RGB")
+    batch = pil_image_to_csrnet_batch(img).to(device)
+
+    with torch.no_grad():
+        density_map, count = csrnet_predict(model, batch)
+
+    h, w = img.size[1], img.size[0]
+    interp = bilinear_interpolation(density_map, (h, w))
+
+    # Overlay: original image with density heatmap on top
+    fig = Figure(figsize=(10, 6))
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
+    ax.imshow(img)
+    ax.imshow(interp, cmap="jet", alpha=0.5, extent=[0, w, h, 0])
+    ax.set_title(f"Epoch {epoch + 1} \u2014 Estimated Count: {count:.2f}")
+    ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(save_dir / f"epoch_{epoch + 1:03d}_overlay.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # Standalone density heatmap
+    fig2 = Figure(figsize=(10, 6))
+    FigureCanvasAgg(fig2)
+    ax2 = fig2.add_subplot(111)
+    im = ax2.imshow(interp, cmap="jet")
+    fig2.colorbar(im, ax=ax2, fraction=0.046, pad=0.04)
+    ax2.set_title(f"Epoch {epoch + 1} \u2014 Density Heatmap\nEstimated Count: {count:.2f}")
+    ax2.axis("off")
+    fig2.tight_layout()
+    fig2.savefig(save_dir / f"epoch_{epoch + 1:03d}_heatmap.png", dpi=150, bbox_inches="tight")
+    plt.close(fig2)
+
+    if was_training:
+        model.train()
 
 
 def main():
@@ -450,6 +518,7 @@ def main():
             adjust_learning_rate(optimizer, epoch)
             epoch_loss = train(train_list, model, criterion, optimizer, epoch, device, status)
             prec1 = validate(val_list, model, device, status)
+            _save_sample_inference(model, device, args.task, epoch)
 
             plotter.update(epoch, epoch_loss, prec1)
 
